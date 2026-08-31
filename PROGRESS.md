@@ -46,9 +46,13 @@ Two *separate* auth concerns, deliberately not merged:
 - Alembic configured from day one. Initial migration creates `tenants` + `tenant_users`.
 
 ### Tests
-- `pytest` + `pytest-asyncio` + `httpx.AsyncClient` against an in-memory SQLite DB.
-- Covers: register creates tenant+user, duplicate email rejected, login returns token,
-  bad password rejected, `/me` requires a valid token and returns the caller's tenant.
+- Unit: `pytest` + `pytest-asyncio` + `httpx.AsyncClient` against in-memory SQLite.
+  Covers register / duplicate-email / login / bad-password / token-protected `/me`.
+- Integration (`tests/integration/`): same auth flow against the **real Postgres** from
+  docker-compose — each test runs in a transaction rolled back afterward; auto-skips
+  when the DB is unreachable. Verified `alembic upgrade head` + `alembic check` (models
+  and migration are in sync) against Postgres 16.
+- CI now spins up Postgres + Redis service containers and runs migrate + check + pytest.
 
 ## Known simplifications (demo-scale vs production)
 - Single Postgres, single Redis (later) — no HA/replication.

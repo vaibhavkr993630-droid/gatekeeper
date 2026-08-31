@@ -11,6 +11,33 @@ jobs:
     defaults:
       run:
         working-directory: backend
+    services:
+      db:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: gatekeeper
+          POSTGRES_PASSWORD: gatekeeper
+          POSTGRES_DB: gatekeeper
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gatekeeper"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      SECRET_KEY: ci-secret
+      DATABASE_URL: postgresql+asyncpg://gatekeeper:gatekeeper@localhost:5432/gatekeeper
+      REDIS_URL: redis://localhost:6379/0
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -18,4 +45,6 @@ jobs:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
       - run: ruff check .
+      - run: alembic upgrade head
+      - run: alembic check
       - run: pytest -q
