@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { authApi, clearToken } from "../api";
+import ServicesPanel from "../components/ServicesPanel";
 
 export default function DashboardPage() {
   const navigate = useNavigate();
@@ -33,10 +34,7 @@ export default function DashboardPage() {
       </header>
 
       <main className="mx-auto max-w-4xl p-6">
-        <h1 className="text-lg font-semibold">Services</h1>
-        <div className="mt-4 rounded-lg border border-dashed bg-white p-10 text-center text-sm text-slate-400">
-          No services yet. Service registration arrives in Phase 2.
-        </div>
+        <ServicesPanel />
       </main>
     </div>
   );

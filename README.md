@@ -20,6 +20,26 @@ full product vision and `PROGRESS.md` for current build status.
 1. **Dashboard auth** — JWT. Tenant users log in to manage their services.
 2. **Gateway auth** — per-service API keys authenticating traffic through the proxy.
 
+## API (so far)
+
+Dashboard API, JWT bearer unless noted:
+
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/api/auth/register` | → access token (creates tenant + owner user) |
+| POST | `/api/auth/login` | → access token |
+| GET | `/api/auth/me` | current user + tenant |
+| GET | `/api/services` | tenant's services only |
+| POST | `/api/services` | create service + rate-limit rule |
+| GET·PATCH·DELETE | `/api/services/{id}` | 404 (not 403) for other tenants' services |
+| PUT | `/api/services/{id}/rule` | replace the policy |
+| GET·POST | `/api/services/{id}/keys` | POST returns the plaintext key **once** |
+| DELETE | `/api/services/{id}/keys/{key_id}` | revoke |
+| GET | `/health` | no auth |
+
+Rate-limit rule: `algorithm` (`token_bucket` \| `sliding_window_counter`), `limit`,
+`window_seconds`, optional `burst` (≥ `limit`). API keys are stored as SHA-256 hashes.
+
 ## Local dev
 
 ```bash
@@ -31,6 +51,14 @@ docker compose up -d db redis        # from repo root
 alembic upgrade head
 uvicorn app.main:app --reload
 pytest
+```
+
+Frontend:
+
+```bash
+cd frontend
+npm install
+npm run dev          # proxies /api to localhost:8000
 ```
 
 ## Scaling notes (what would change at real scale)

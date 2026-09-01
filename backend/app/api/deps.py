@@ -5,8 +5,10 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import JWTError, decode_access_token
+from app.crud import service as crud_service
 from app.crud import tenant as crud_tenant
 from app.db.session import get_db
+from app.models.service import Service
 from app.models.tenant import TenantUser
 
 _bearer = HTTPBearer(auto_error=True)
@@ -36,3 +38,22 @@ async def get_current_user(
 
 
 CurrentUser = Annotated[TenantUser, Depends(get_current_user)]
+
+
+async def get_owned_service(
+    service_id: int,
+    db: DbDep,
+    current_user: CurrentUser,
+) -> Service:
+    """RBAC gate for every service-scoped route. Returns 404 (not 403) for a service
+    owned by another tenant so existence isn't leaked across tenants.
+    """
+    service = await crud_service.get_service(
+        db, service_id=service_id, tenant_id=current_user.tenant_id
+    )
+    if service is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Service not found")
+    return service
+
+
+OwnedService = Annotated[Service, Depends(get_owned_service)]
