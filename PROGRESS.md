@@ -3,12 +3,12 @@
 Distributed rate-limiting & API gateway platform. See `GATEKEEPER_BRIEF.md` for full vision.
 
 ## Active phase
-Phase 2 — Service Registration & Policy Config (COMPLETE, pending review — NOT committed)
+Phase 3 — Rate Limiting Core (COMPLETE, pending review — NOT committed)
 
 ## Phase status
 - [x] Phase 1 — Foundation: Tenant model, JWT auth (register/login), dashboard shell, Alembic, pytest
 - [x] Phase 2 — Service registration, per-service rate-limit policy, API keys, CRUD + RBAC
-- [ ] Phase 3 — Rate limiting core (token bucket + sliding window counter, Redis Lua)
+- [x] Phase 3 — Token bucket + sliding window counter on Redis via Lua; concurrency tests
 - [ ] Phase 4 — Gateway/proxy layer
 - [ ] Phase 5 — Real-time tenant dashboard (WebSocket)
 - [ ] Phase 6 — Platform admin view
@@ -102,11 +102,70 @@ Pydantic: `limit` 1..1e6, `window_seconds` 1..86400, `burst >= limit` (model val
 `ServicesPanel` on the dashboard: list, create form (name / URL / algorithm / limit /
 window), delete, mint API key (one-time reveal banner). TanStack Query for cache.
 
+## Phase 3 — what was built and why
+
+### The problem this phase solves
+A naive limiter does `GET count` → decide in Python → `INCR`. Under concurrent load
+two requests both read count=99 (limit 100), both decide "allowed", both increment →
+101. Classic check-then-act (TOCTOU) race. `test_naive_check_then_incr_over_admits`
+demonstrates it empirically (250 concurrent → >100 admitted).
+
+### The fix: one Lua script per check
+Redis executes a Lua script as a single indivisible unit — no other command
+interleaves. The read-decide-write happens atomically server-side, so the count is
+always exact. Scripts are loaded once and invoked by SHA via `EVALSHA`
+(redis-py's `register_script`, with automatic `EVAL` fallback on `NOSCRIPT`).
+`test_token_bucket_exact_under_concurrency` / `..._sliding_window_...` fire 250
+concurrent `check()` calls and assert **exactly 100** admitted.
+
+### Time is an argument, not `redis.call('TIME')`
+`check(key, *, now=None)` — `now` defaults to wall clock but tests pass explicit
+values. Keeps each script a pure function of its inputs: deterministic (safe under
+any Redis replication mode) and testable without `sleep()` — window rollover and
+bucket refill are tested by advancing `now`.
+
+### Common interface (pluggable strategy)
+`app/rate_limit/base.py`: `RateLimiter.check(key, *, cost=1, now=None) -> RateLimitResult`
+(`allowed`, `limit`, `remaining`, `retry_after`). `factory.get_rate_limiter(rule, redis)`
+maps a stored policy to an implementation; the gateway (Phase 4) calls it and never
+branches on the algorithm.
+
+### Algorithms
+- **Token bucket** (`scripts/token_bucket.lua`) — HASH `{tokens, ts}`; refill for
+  elapsed time then consume `cost`. `capacity` = `burst or limit`, `rate` =
+  `limit / window_seconds`. Burst-friendly; long-run average held at `rate`.
+- **Sliding window counter** (`scripts/sliding_window.lua`) — two fixed sub-window
+  counters; `estimate = prev * (1 - elapsed_fraction) + cur`. O(1) memory vs. the
+  sliding-window *log* (which stores every timestamp in a ZSET). Bounded
+  approximation error near boundaries; `test_sliding_window_smooths_the_boundary`
+  shows it stops the "double quota across the boundary" that a fixed window allows.
+
+### Keys
+`make_key(scope, identifier)` → `rl:{scope}:identifier`. `{scope}` is a Redis Cluster
+hash tag so the sliding-window limiter's multiple sub-keys stay on one slot.
+Harmless on a single node.
+
+### Redis client
+`app/core/redis.py` — lazy shared async client, `decode_responses=True` (Lua string
+returns arrive as `str`). Closed on app shutdown (lifespan). `/health` now pings it.
+
+### Tests — 26 total (was 12)
+Concurrency (the headline proof), refill-over-time, capacity cap, retry_after
+sanity, window rollover, boundary smoothing, key isolation, factory mapping,
+config validation, and the naive-race counter-example. Integration tests use a
+**bounded** `BlockingConnectionPool` so hundreds of concurrent checks queue on a
+connection (as a real service would) rather than opening a socket per task.
+
 ## Known simplifications (demo-scale vs production)
 - `ApiKey.is_active` / `last_used_at` columns exist but aren't enforced/updated yet —
   Phase 4 (gateway) wires them. Revoke currently hard-deletes.
 - One rule per service enforced only by the unique index on `rate_limit_rules.service_id`.
 - `upstream_url` isn't validated against SSRF (private IPs, localhost) — noted for Phase 4/7.
+- App Redis client uses redis-py's default (unbounded) connection pool. Production
+  should set an explicit bounded pool sized to the worker's concurrency.
+- Sliding-window-counter `retry_after` is an approximation (documented in the .lua).
+- Redis is a single instance — no HA. A Redis failure currently means the limiter
+  errors; Phase 4 must decide fail-open vs. fail-closed for the gateway.
 - Single Postgres, single Redis (later) — no HA/replication.
 - Access tokens only, no refresh-token rotation.
 - SECRET_KEY from a single env var, no key rotation / JWKS.

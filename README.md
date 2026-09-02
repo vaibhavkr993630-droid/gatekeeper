@@ -35,10 +35,29 @@ Dashboard API, JWT bearer unless noted:
 | PUT | `/api/services/{id}/rule` | replace the policy |
 | GET·POST | `/api/services/{id}/keys` | POST returns the plaintext key **once** |
 | DELETE | `/api/services/{id}/keys/{key_id}` | revoke |
-| GET | `/health` | no auth |
+| GET | `/health` | no auth; reports Redis reachability |
 
 Rate-limit rule: `algorithm` (`token_bucket` \| `sliding_window_counter`), `limit`,
 `window_seconds`, optional `burst` (≥ `limit`). API keys are stored as SHA-256 hashes.
+
+## Rate limiting (`app/rate_limit/`)
+
+One interface — `RateLimiter.check(key, *, cost=1, now=None) -> RateLimitResult` — with
+two implementations selected per service by `factory.get_rate_limiter`:
+
+- **token bucket** — `capacity` tokens (= `burst` or `limit`) refilling at
+  `limit / window_seconds` per second; allows bursts, holds the long-run average.
+- **sliding window counter** — `limit` per rolling `window_seconds` via the
+  two-counter approximation (O(1) memory, no per-request timestamp log).
+
+Each `check` is a single **Lua script** run by Redis, so read-decide-write is atomic —
+no check-then-act race under concurrent load. `now` is passed in (not read via
+`redis.call('TIME')`) so the scripts are deterministic and testable without sleeping.
+`tests/integration/test_rate_limit.py` fires 250 concurrent checks and asserts the
+admitted count is *exactly* the limit — and includes a naive non-atomic version that
+provably over-admits.
+
+Not yet on the request path — the gateway wires it in Phase 4.
 
 ## Local dev
 
