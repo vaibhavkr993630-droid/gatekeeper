@@ -2,8 +2,10 @@ from typing import Annotated
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.redis import get_redis
 from app.core.security import JWTError, decode_access_token
 from app.crud import service as crud_service
 from app.crud import tenant as crud_tenant
@@ -14,6 +16,14 @@ from app.models.tenant import TenantUser
 _bearer = HTTPBearer(auto_error=True)
 
 DbDep = Annotated[AsyncSession, Depends(get_db)]
+
+
+def get_redis_client() -> Redis:
+    """Thin DI wrapper so tests can override the Redis used by the gateway."""
+    return get_redis()
+
+
+RedisDep = Annotated[Redis, Depends(get_redis_client)]
 
 
 async def get_current_user(

@@ -3,17 +3,25 @@
 Each fixture auto-skips when its backend is unreachable, so `pytest` stays green
 on a machine without the containers up. CI brings both service containers up first.
 """
+import asyncio
+import contextlib
 from collections.abc import AsyncGenerator
 
 import pytest
 import pytest_asyncio
+import uvicorn
 from httpx import ASGITransport, AsyncClient
 from redis.asyncio import BlockingConnectionPool, Redis
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from starlette.applications import Starlette
+from starlette.responses import JSONResponse
+from starlette.routing import Route
 
-from app.api.deps import get_db
+from app.api.deps import get_db, get_redis_client
 from app.core.config import settings
 from app.db.base import Base
+from app.gateway import recorder as gateway_recorder
+from app.gateway.client import close_http_client
 from app.main import app
 
 
@@ -80,3 +88,80 @@ async def redis_client():
     finally:
         await client.flushdb()
         await client.aclose()
+
+
+# --- gateway (Phase 4) --------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def stub_upstream() -> AsyncGenerator[str, None]:
+    """A real HTTP server on an ephemeral port that echoes the request back,
+    so gateway tests exercise actual network forwarding. `?status=NNN` sets the
+    response code; `?sleep=S` delays the response."""
+
+    async def echo(request):
+        params = request.query_params
+        if params.get("sleep"):
+            await asyncio.sleep(float(params["sleep"]))
+        body = await request.body()
+        return JSONResponse(
+            {
+                "method": request.method,
+                "path": request.url.path,
+                "query": request.url.query,
+                "headers": {k.lower(): v for k, v in request.headers.items()},
+                "body": body.decode(errors="replace"),
+            },
+            status_code=int(params.get("status", 200)),
+        )
+
+    methods = ["GET", "POST", "PUT", "PATCH", "DELETE"]
+    stub = Starlette(routes=[Route("/{path:path}", echo, methods=methods)])
+    config = uvicorn.Config(stub, host="127.0.0.1", port=0, log_level="warning")
+    server = uvicorn.Server(config)
+    task = asyncio.create_task(server.serve())
+    try:
+        while not server.started:
+            await asyncio.sleep(0.02)
+        port = server.servers[0].sockets[0].getsockname()[1]
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest_asyncio.fixture
+async def gateway_client(
+    pg_engine, redis_client: Redis
+) -> AsyncGenerator[tuple[AsyncClient, async_sessionmaker], None]:
+    """HTTP client wired to the app with a *real committing* DB session (the
+    gateway's background tasks commit RequestLog rows) and the flushed test Redis.
+    Tables are truncated afterwards."""
+    maker = async_sessionmaker(pg_engine, expire_on_commit=False, autoflush=False)
+
+    async def _override_get_db():
+        async with maker() as session:
+            yield session
+
+    # the gateway's shared httpx client is a process global — reset it so this test
+    # gets one bound to its own event loop (and clean it up afterwards)
+    await close_http_client()
+    # background tasks (record_request) use a module-global sessionmaker bound to
+    # the app engine; point it at this test's engine so it shares the test loop
+    original_maker = gateway_recorder.SessionLocal
+    gateway_recorder.SessionLocal = maker
+
+    app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[get_redis_client] = lambda: redis_client
+    transport = ASGITransport(app=app)
+    try:
+        async with AsyncClient(transport=transport, base_url="http://gw") as ac:
+            yield ac, maker
+    finally:
+        app.dependency_overrides.clear()
+        gateway_recorder.SessionLocal = original_maker
+        await close_http_client()
+        async with pg_engine.begin() as conn:
+            for table in reversed(Base.metadata.sorted_tables):
+                await conn.exec_driver_sql(f'TRUNCATE TABLE "{table.name}" RESTART IDENTITY CASCADE')

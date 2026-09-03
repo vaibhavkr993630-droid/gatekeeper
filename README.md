@@ -40,6 +40,12 @@ Dashboard API, JWT bearer unless noted:
 Rate-limit rule: `algorithm` (`token_bucket` \| `sliding_window_counter`), `limit`,
 `window_seconds`, optional `burst` (≥ `limit`). API keys are stored as SHA-256 hashes.
 
+**Gateway (data plane):** `{ANY} /gw/{public_id}/{path}` — send your service's API
+key as `X-API-Key` or `Authorization: Bearer`. GateKeeper rate-checks per client IP,
+then forwards to your `upstream_url` and streams the response back, or returns `429`
+with `Retry-After`. `502`/`504` if your backend is unreachable / slow. Every call is
+logged (`RequestLog`) for the dashboard.
+
 ## Rate limiting (`app/rate_limit/`)
 
 One interface — `RateLimiter.check(key, *, cost=1, now=None) -> RateLimitResult` — with
@@ -57,7 +63,16 @@ no check-then-act race under concurrent load. `now` is passed in (not read via
 admitted count is *exactly* the limit — and includes a naive non-atomic version that
 provably over-admits.
 
-Not yet on the request path — the gateway wires it in Phase 4.
+## Gateway hot path (`app/gateway/`)
+
+Per proxied request: **1 indexed DB read** (API-key hash → service + rule),
+**1 Redis round-trip** (the Lua check), **1 pooled upstream call** (shared
+`httpx.AsyncClient`). Request logging and the `last_used_at` touch run as a
+background task *after* the response. Hop-by-hop headers and the gateway's own
+credentials are stripped before forwarding; `X-Forwarded-For/-Host` are added.
+
+If Redis is unreachable the gateway **fails open** by default (request allowed,
+`X-RateLimit-Bypassed: true`) — configurable to fail closed (`503`).
 
 ## Local dev
 

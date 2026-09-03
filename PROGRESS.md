@@ -3,13 +3,13 @@
 Distributed rate-limiting & API gateway platform. See `GATEKEEPER_BRIEF.md` for full vision.
 
 ## Active phase
-Phase 3 — Rate Limiting Core (COMPLETE, pending review — NOT committed)
+Phase 4 — Gateway/Proxy Layer (COMPLETE, pending review — NOT committed)
 
 ## Phase status
 - [x] Phase 1 — Foundation: Tenant model, JWT auth (register/login), dashboard shell, Alembic, pytest
 - [x] Phase 2 — Service registration, per-service rate-limit policy, API keys, CRUD + RBAC
 - [x] Phase 3 — Token bucket + sliding window counter on Redis via Lua; concurrency tests
-- [ ] Phase 4 — Gateway/proxy layer
+- [x] Phase 4 — Reverse-proxy gateway: API-key auth → rate check → httpx forward / 429; RequestLog
 - [ ] Phase 5 — Real-time tenant dashboard (WebSocket)
 - [ ] Phase 6 — Platform admin view
 - [ ] Phase 7 — Hardening (Docker Compose, CI, Sentry, tests)
@@ -156,17 +156,79 @@ config validation, and the naive-race counter-example. Integration tests use a
 **bounded** `BlockingConnectionPool` so hundreds of concurrent checks queue on a
 connection (as a real service would) rather than opening a socket per task.
 
+## Phase 4 — what was built and why
+
+### The request path (`app/gateway/`)
+`{ANY} /gw/{public_id}/{path}` — one catch-all route:
+
+1. **Client IP** — `X-Forwarded-For` first hop if `trust_forwarded_for` (default on;
+   only safe behind an ingress that overwrites the header), else the socket peer.
+2. **Identify** (`identity.resolve_target`) — `X-API-Key` or `Authorization: Bearer`
+   → SHA-256 → **one** indexed lookup on `api_keys.key_hash`, eager-loading the
+   service + rule. The URL's `public_id` is confirmed against the key's service
+   (mismatch → 404, as if the route doesn't exist). Inactive key → 401, disabled
+   service → 403. Auth failures are **not** logged to RequestLog (no tenant to
+   attribute them to).
+3. **Rate check** — `get_rate_limiter(rule, redis).check(make_key(public_id, ip))`.
+   One Redis round-trip. Over limit → `429` + `Retry-After` + `X-RateLimit-*`.
+4. **Forward** (`forwarder.forward`) — shared pooled `httpx.AsyncClient`, method +
+   path + query + body to `upstream_url`. Strips hop-by-hop headers and the
+   gateway's own `Authorization`/`X-API-Key` (the tenant's backend shouldn't see
+   them); adds `X-Forwarded-For`/`-Host`. **Streams the raw response back**
+   (`aiter_raw`), closing the upstream connection via background task. Upstream
+   timeout → `504`, connection error → `502`.
+5. **Record** (`recorder.record_request`) — one `RequestLog` row + `api_key.last_used_at`
+   touch, as a FastAPI **BackgroundTask after the response**. The caller never
+   waits on the DB. Uses its own session (the request's is already closed).
+
+### Hot-path budget (per request)
+1 indexed DB read · 1 Redis EVALSHA · 1 pooled upstream call. Everything else is
+in-memory. Logging + key-touch are off-path. Documented scale changes in
+`app/gateway/README.md` (colocate Redis, cache the key lookup, batch RequestLog).
+
+### Fail-open vs fail-closed
+`rate_limit_fail_open` (default **True**). Redis down → request is allowed through
+with `X-RateLimit-Bypassed: true` and a WARNING log; set False to return `503`
+instead. A limiter outage shouldn't take down every tenant's traffic — but the
+choice is a config knob, not baked in.
+
+### Two planes, still separate
+`/api/services/*` = management (JWT, tenant configures). `/gw/*` = data plane
+(API key, tenant *traffic*). Different routers, different auth, different concerns.
+
+### Entities
+- `RequestLog` — tenant_id (denormalised from service so the feed query needs no
+  join), service_id, created_at (all indexed), allowed, status_code, method, path,
+  client_ip, rule_algorithm, latency_ms (upstream TTFB; null for blocked/failed).
+  Migration `0003_request_logs`.
+
+### Tests
+- Unit (`test_gateway_unit.py`, no I/O): URL building, header filtering (strip +
+  XFF append), API-key extraction, client-IP resolution, Retry-After ceil.
+- Integration (`test_gateway.py`, real PG + Redis + a real echo upstream on an
+  ephemeral port): allowed request forwarded with fidelity + headers stripped,
+  limit enforced (both algorithms), every request recorded, missing/bad key,
+  wrong `public_id` → 404, disabled service → 403, upstream status passthrough,
+  upstream down → 502. `gateway_client` fixture uses a real committing session
+  (background tasks commit) and truncates after.
+- Full suite: **55 passing**. Verified `alembic upgrade head` + `alembic check`
+  against Postgres 16 (migration 0003 in sync).
+
 ## Known simplifications (demo-scale vs production)
-- `ApiKey.is_active` / `last_used_at` columns exist but aren't enforced/updated yet —
-  Phase 4 (gateway) wires them. Revoke currently hard-deletes.
+- Rate limit is keyed per (service, client IP). Per-API-key or per-custom-header
+  is a natural extension.
+- `latency_ms` is upstream time-to-first-byte, not full transfer (we return the
+  streaming response before the body finishes).
+- Request body is buffered, not streamed (fine for API payloads; note for large uploads).
+- `api_key.last_used_at` is touched on every request — production should throttle
+  (skip when recent) to avoid a write per request.
+- `RequestLog` has no retention/cleanup job yet — Phase 7.
+- `upstream_url` isn't validated against SSRF (private IPs, localhost) — Phase 7.
 - One rule per service enforced only by the unique index on `rate_limit_rules.service_id`.
-- `upstream_url` isn't validated against SSRF (private IPs, localhost) — noted for Phase 4/7.
 - App Redis client uses redis-py's default (unbounded) connection pool. Production
   should set an explicit bounded pool sized to the worker's concurrency.
 - Sliding-window-counter `retry_after` is an approximation (documented in the .lua).
-- Redis is a single instance — no HA. A Redis failure currently means the limiter
-  errors; Phase 4 must decide fail-open vs. fail-closed for the gateway.
-- Single Postgres, single Redis (later) — no HA/replication.
+- Redis / Postgres are single instances — no HA/replication.
 - Access tokens only, no refresh-token rotation.
 - SECRET_KEY from a single env var, no key rotation / JWKS.
 - Frontend dashboard shell is intentionally near-empty this phase.

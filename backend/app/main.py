@@ -6,11 +6,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.routers import auth, services
 from app.core.config import settings
 from app.core.redis import close_redis, get_redis
+from app.gateway import router as gateway_router
+from app.gateway.client import close_http_client
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     yield
+    await close_http_client()
     await close_redis()
 
 
@@ -26,6 +29,7 @@ app.add_middleware(
 
 app.include_router(auth.router, prefix="/api")
 app.include_router(services.router, prefix="/api")
+app.include_router(gateway_router, prefix="/gw")
 
 
 @app.get("/health", tags=["ops"])
