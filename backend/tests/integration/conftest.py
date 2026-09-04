@@ -20,9 +20,21 @@ from starlette.routing import Route
 from app.api.deps import get_db, get_redis_client
 from app.core.config import settings
 from app.db.base import Base
-from app.gateway import recorder as gateway_recorder
+from app.db.session import reset_db_engine
 from app.gateway.client import close_http_client
 from app.main import app
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _reset_shared_async_resources():
+    """The app holds process-global async resources (db engine, httpx client) that
+    bind to the first event loop that uses them. pytest-asyncio gives each test a
+    fresh loop, so reset them around every test."""
+    await reset_db_engine()
+    await close_http_client()
+    yield
+    await reset_db_engine()
+    await close_http_client()
 
 
 @pytest_asyncio.fixture
@@ -144,14 +156,6 @@ async def gateway_client(
         async with maker() as session:
             yield session
 
-    # the gateway's shared httpx client is a process global — reset it so this test
-    # gets one bound to its own event loop (and clean it up afterwards)
-    await close_http_client()
-    # background tasks (record_request) use a module-global sessionmaker bound to
-    # the app engine; point it at this test's engine so it shares the test loop
-    original_maker = gateway_recorder.SessionLocal
-    gateway_recorder.SessionLocal = maker
-
     app.dependency_overrides[get_db] = _override_get_db
     app.dependency_overrides[get_redis_client] = lambda: redis_client
     transport = ASGITransport(app=app)
@@ -160,8 +164,6 @@ async def gateway_client(
             yield ac, maker
     finally:
         app.dependency_overrides.clear()
-        gateway_recorder.SessionLocal = original_maker
-        await close_http_client()
         async with pg_engine.begin() as conn:
             for table in reversed(Base.metadata.sorted_tables):
                 await conn.exec_driver_sql(f'TRUNCATE TABLE "{table.name}" RESTART IDENTITY CASCADE')

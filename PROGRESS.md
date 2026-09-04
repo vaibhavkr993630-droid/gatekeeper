@@ -3,14 +3,14 @@
 Distributed rate-limiting & API gateway platform. See `GATEKEEPER_BRIEF.md` for full vision.
 
 ## Active phase
-Phase 4 — Gateway/Proxy Layer (COMPLETE, pending review — NOT committed)
+Phase 5 — Real-Time Tenant Dashboard (COMPLETE, pending review — NOT committed)
 
 ## Phase status
 - [x] Phase 1 — Foundation: Tenant model, JWT auth (register/login), dashboard shell, Alembic, pytest
 - [x] Phase 2 — Service registration, per-service rate-limit policy, API keys, CRUD + RBAC
 - [x] Phase 3 — Token bucket + sliding window counter on Redis via Lua; concurrency tests
 - [x] Phase 4 — Reverse-proxy gateway: API-key auth → rate check → httpx forward / 429; RequestLog
-- [ ] Phase 5 — Real-time tenant dashboard (WebSocket)
+- [x] Phase 5 — Per-tenant WebSocket live feed + usage charts (stats endpoint)
 - [ ] Phase 6 — Platform admin view
 - [ ] Phase 7 — Hardening (Docker Compose, CI, Sentry, tests)
 - [ ] Phase 8 — Deploy
@@ -211,10 +211,63 @@ choice is a config knob, not baked in.
   wrong `public_id` → 404, disabled service → 403, upstream status passthrough,
   upstream down → 502. `gateway_client` fixture uses a real committing session
   (background tasks commit) and truncates after.
-- Full suite: **55 passing**. Verified `alembic upgrade head` + `alembic check`
-  against Postgres 16 (migration 0003 in sync).
+- Full suite: **55 passing** at end of Phase 4. Verified `alembic upgrade head` +
+  `alembic check` against Postgres 16 (migration 0003 in sync).
+
+## Phase 5 — what was built and why
+
+### Live feed (`app/ws/`)
+`ws://<host>/ws/feed?token=<tenant JWT>`.
+
+- **`ConnectionManager`** (`manager.py`) — `{tenant_id: {sockets}}`. `publish(tenant_id, msg)`
+  can only reach sockets filed under that tenant. Broken sockets are evicted, not
+  retried, and don't block siblings.
+- **Isolation is structural** — the endpoint (`router.py`) verifies the JWT and
+  takes `tenant_id` *from the token*, never from the client. There is no
+  "subscribe" message; a client cannot ask for anything but its own feed.
+  `test_ws_feed.py::test_gateway_request_reaches_only_the_owning_tenant` fires a
+  request for tenant A and asserts tenant B's socket stays empty.
+- On connect: a snapshot of the tenant's last 50 requests, then live events.
+- The gateway publishes via **`broadcast.broadcast_request`**, a BackgroundTask
+  added alongside `record_request` — independent (either can fail alone), off the
+  hot path, and skipped entirely when the tenant has no sockets connected.
+
+### Why in-process, not Redis pub/sub
+The brief scopes Redis to atomic counters. The feed uses in-process fan-out.
+Trade-off (documented in `app/ws/README.md`): two uvicorn workers → a client on
+worker A misses events the gateway handled on worker B. At scale each gateway
+node PUBLISHes to Redis pub/sub (or Kafka/NATS) and each dashboard node
+SUBSCRIBEs; the `ConnectionManager` interface is unchanged, only its feed source.
+
+### WebSocket auth
+JWT in the query string (`?token=`) — browsers can't set headers on `WebSocket`.
+Noted risk: tokens in URLs can end up in logs; first-message auth would avoid it.
+Bad/expired token → close code `4401` before `accept()`.
+
+### Usage stats — `GET /api/services/{id}/stats?minutes=N`
+Behind `OwnedService` (same RBAC as the rest of `/api/services`). Postgres
+`date_trunc('minute', ...)` with a `count(*) FILTER (WHERE NOT allowed)` for the
+per-minute series + totals + block rate. Frontend polls every 5s and renders
+requests/min (stacked area) + blocked/min (bar) with Recharts; "quota" shown as
+the rule's `limit / window` per client IP.
+
+### DB engine refactored to lazy + resettable
+`app/db/session.py` — `SessionLocal()` now resolves a lazily-built engine on
+first use, with `reset_db_engine()`. Fixes "Future attached to a different loop"
+across pytest's function-scoped loops (the background-task session was a process
+global). An autouse fixture resets the engine + httpx client around every
+integration test; the earlier per-fixture monkeypatch hack is gone.
+
+### Tests — 64 total (was 55)
+`test_ws_unit.py` (ConnectionManager isolation / cleanup / dead-socket) +
+`test_ws_feed.py` (gateway→feed isolation, blocked events broadcast, token
+reject, snapshot) + `test_stats.py` (aggregates reflect traffic, tenant-scoped).
 
 ## Known simplifications (demo-scale vs production)
+- Live feed is in-process fan-out — single uvicorn worker only (see above).
+- WebSocket JWT is passed in the query string.
+- Stats query scans `request_logs` per call — fine at short retention; at scale
+  pre-aggregate into rollup rows or a TSDB.
 - Rate limit is keyed per (service, client IP). Per-API-key or per-custom-header
   is a natural extension.
 - `latency_ms` is upstream time-to-first-byte, not full transfer (we return the

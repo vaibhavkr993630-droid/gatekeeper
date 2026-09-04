@@ -66,8 +66,37 @@ export interface ApiKey {
   last_used_at: string | null;
 }
 
+export interface StatPoint {
+  minute: string;
+  requests: number;
+  blocked: number;
+}
+export interface ServiceStats {
+  service_id: number;
+  window_minutes: number;
+  rule: Rule;
+  totals: { requests: number; blocked: number; block_rate: number };
+  series: StatPoint[];
+}
+
+export interface FeedEvent {
+  type: "request";
+  service_id: number;
+  service_name: string;
+  allowed: boolean;
+  status_code: number;
+  method: string;
+  path: string;
+  client_ip: string;
+  rule_algorithm: string | null;
+  latency_ms: number | null;
+  at: string;
+}
+
 export const servicesApi = {
   list: () => request<Service[]>("/services"),
+  stats: (id: number, minutes = 60) =>
+    request<ServiceStats>(`/services/${id}/stats?minutes=${minutes}`),
   create: (body: { name: string; upstream_url: string; rule: Rule }) =>
     request<Service>("/services", { method: "POST", body: JSON.stringify(body) }),
   remove: (id: number) =>

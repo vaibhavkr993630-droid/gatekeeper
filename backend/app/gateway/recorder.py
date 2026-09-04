@@ -20,6 +20,7 @@ log = logging.getLogger("gatekeeper.gateway")
 class RequestRecord:
     tenant_id: int
     service_id: int
+    service_name: str
     api_key_id: int
     allowed: bool
     status_code: int

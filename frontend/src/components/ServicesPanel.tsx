@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type Algorithm, servicesApi } from "../api";
+import LiveFeed from "./LiveFeed";
+import UsageCharts from "./UsageCharts";
 
 const ALGORITHMS: Algorithm[] = ["sliding_window_counter", "token_bucket"];
 
@@ -18,6 +20,7 @@ export default function ServicesPanel() {
   const [windowSeconds, setWindowSeconds] = useState(60);
   const [error, setError] = useState<string | null>(null);
   const [newKey, setNewKey] = useState<string | null>(null);
+  const [openId, setOpenId] = useState<number | null>(null);
 
   const create = useMutation({
     mutationFn: () =>
@@ -139,6 +142,12 @@ export default function ServicesPanel() {
                   {s.name} {!s.is_active && <span className="text-slate-400">(inactive)</span>}
                 </span>
                 <div className="flex gap-3">
+                  <button
+                    className="text-slate-500 underline"
+                    onClick={() => setOpenId(openId === s.id ? null : s.id)}
+                  >
+                    {openId === s.id ? "Hide" : "Dashboard"}
+                  </button>
                   <button className="text-slate-500 underline" onClick={() => mintKey.mutate(s.id)}>
                     New API key
                   </button>
@@ -151,6 +160,12 @@ export default function ServicesPanel() {
                 → {s.upstream_url} · {s.rule.algorithm} {s.rule.limit}/{s.rule.window_seconds}s
               </p>
               <p className="mt-1 font-mono text-xs text-slate-400">gw id: {s.public_id}</p>
+              {openId === s.id && (
+                <div className="mt-4 grid gap-4 border-t pt-4 lg:grid-cols-2">
+                  <UsageCharts serviceId={s.id} />
+                  <LiveFeed serviceId={s.id} />
+                </div>
+              )}
             </li>
           ))}
         </ul>

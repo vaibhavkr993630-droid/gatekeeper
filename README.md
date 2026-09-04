@@ -35,6 +35,8 @@ Dashboard API, JWT bearer unless noted:
 | PUT | `/api/services/{id}/rule` | replace the policy |
 | GET·POST | `/api/services/{id}/keys` | POST returns the plaintext key **once** |
 | DELETE | `/api/services/{id}/keys/{key_id}` | revoke |
+| GET | `/api/services/{id}/stats?minutes=N` | per-minute request/block series + totals |
+| WS | `/ws/feed?token=<jwt>` | live per-tenant traffic feed — isolation enforced server-side |
 | GET | `/health` | no auth; reports Redis reachability |
 
 Rate-limit rule: `algorithm` (`token_bucket` \| `sliding_window_counter`), `limit`,
@@ -73,6 +75,14 @@ credentials are stripped before forwarding; `X-Forwarded-For/-Host` are added.
 
 If Redis is unreachable the gateway **fails open** by default (request allowed,
 `X-RateLimit-Bypassed: true`) — configurable to fail closed (`503`).
+
+## Live dashboard (`app/ws/`)
+
+Each proxied request is pushed to the owning tenant's dashboard sockets by an
+in-process `ConnectionManager` (`{tenant_id: {sockets}}`). A socket's tenant comes
+from its verified JWT — never from the client — so a tenant only ever sees its own
+traffic. Single-process fan-out for the demo; at scale each node would publish to
+Redis pub/sub (or a message bus) and re-fan-out locally.
 
 ## Local dev
 

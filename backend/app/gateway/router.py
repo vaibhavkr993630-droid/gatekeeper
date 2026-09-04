@@ -22,6 +22,7 @@ from app.gateway.recorder import RequestRecord, record_request
 from app.rate_limit import make_key
 from app.rate_limit.base import RateLimitResult
 from app.rate_limit.factory import get_rate_limiter
+from app.ws.broadcast import broadcast_request
 
 log = logging.getLogger("gatekeeper.gateway")
 
@@ -65,21 +66,21 @@ async def gateway(public_id: str, path: str, request: Request, db: DbDep, redis:
     background = BackgroundTasks()
 
     def _record(*, allowed: bool, status_code: int, latency_ms: int | None) -> None:
-        background.add_task(
-            record_request,
-            RequestRecord(
-                tenant_id=target.service.tenant_id,
-                service_id=target.service.id,
-                api_key_id=target.api_key_id,
-                allowed=allowed,
-                status_code=status_code,
-                method=request.method,
-                path="/" + path,
-                client_ip=client_ip,
-                rule_algorithm=str(target.rule.algorithm),
-                latency_ms=latency_ms,
-            ),
+        record = RequestRecord(
+            tenant_id=target.service.tenant_id,
+            service_id=target.service.id,
+            service_name=target.service.name,
+            api_key_id=target.api_key_id,
+            allowed=allowed,
+            status_code=status_code,
+            method=request.method,
+            path="/" + path,
+            client_ip=client_ip,
+            rule_algorithm=str(target.rule.algorithm),
+            latency_ms=latency_ms,
         )
+        background.add_task(record_request, record)  # persist
+        background.add_task(broadcast_request, record)  # push to live dashboards
 
     # --- rate limit ---
     limiter = get_rate_limiter(target.rule, redis)
