@@ -6,10 +6,12 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.redis import get_redis
-from app.core.security import JWTError, decode_access_token
+from app.core.security import JWTError, decode_access_token, decode_admin_token
+from app.crud import admin as crud_admin
 from app.crud import service as crud_service
 from app.crud import tenant as crud_tenant
 from app.db.session import get_db
+from app.models.admin import AdminUser
 from app.models.service import Service
 from app.models.tenant import TenantUser
 
@@ -67,3 +69,31 @@ async def get_owned_service(
 
 
 OwnedService = Annotated[Service, Depends(get_owned_service)]
+
+
+async def get_current_admin(
+    creds: Annotated[HTTPAuthorizationCredentials, Depends(_bearer)],
+    db: DbDep,
+) -> AdminUser:
+    """Verifies against `admin_secret_key` — a tenant JWT will never decode here,
+    regardless of any claim it carries, because it's signed with a different key."""
+    cred_exc = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate admin credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = decode_admin_token(creds.credentials)
+        if payload.get("scope") != "admin":
+            raise cred_exc
+        admin_id = int(payload["sub"])
+    except (JWTError, KeyError, ValueError):
+        raise cred_exc
+
+    admin = await crud_admin.get_admin(db, admin_id)
+    if admin is None or not admin.is_active:
+        raise cred_exc
+    return admin
+
+
+CurrentAdmin = Annotated[AdminUser, Depends(get_current_admin)]

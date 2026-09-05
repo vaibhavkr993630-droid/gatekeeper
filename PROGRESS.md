@@ -3,7 +3,7 @@
 Distributed rate-limiting & API gateway platform. See `GATEKEEPER_BRIEF.md` for full vision.
 
 ## Active phase
-Phase 5 — Real-Time Tenant Dashboard (COMPLETE, pending review — NOT committed)
+Phase 6 — Platform Admin View (COMPLETE, pending review — NOT committed; 2 commits planned)
 
 ## Phase status
 - [x] Phase 1 — Foundation: Tenant model, JWT auth (register/login), dashboard shell, Alembic, pytest
@@ -11,7 +11,7 @@ Phase 5 — Real-Time Tenant Dashboard (COMPLETE, pending review — NOT committ
 - [x] Phase 3 — Token bucket + sliding window counter on Redis via Lua; concurrency tests
 - [x] Phase 4 — Reverse-proxy gateway: API-key auth → rate check → httpx forward / 429; RequestLog
 - [x] Phase 5 — Per-tenant WebSocket live feed + usage charts (stats endpoint)
-- [ ] Phase 6 — Platform admin view
+- [x] Phase 6 — Platform admin auth + system-wide overview; frontend design-system pass
 - [ ] Phase 7 — Hardening (Docker Compose, CI, Sentry, tests)
 - [ ] Phase 8 — Deploy
 
@@ -263,7 +263,74 @@ integration test; the earlier per-fixture monkeypatch hack is gone.
 `test_ws_feed.py` (gateway→feed isolation, blocked events broadcast, token
 reject, snapshot) + `test_stats.py` (aggregates reflect traffic, tenant-scoped).
 
+## Phase 6 — what was built and why
+
+### Two auth planes, cryptographically separate
+`AdminUser` is a standalone entity — not a tenant, not linked to one. Admin JWTs
+are signed with `ADMIN_SECRET_KEY`, a **different key** from tenant tokens
+(`SECRET_KEY`). This isn't "check a different claim" — a tenant token cannot be
+turned into an admin token even if an attacker controls the claims, because the
+signature won't verify against the admin key, and vice versa.
+`test_tenant_token_is_rejected_on_admin_routes` / the reverse prove it end to end.
+
+### No public admin signup
+Admins are platform operators, not customers. `scripts/create_admin.py` is a CLI
+(`python -m scripts.create_admin --email ... `) that inserts directly via the
+app's session — mirrors how real platforms provision the first ops account.
+`test_no_public_admin_registration_endpoint` checks `/api/admin/auth/register`
+is a plain 404.
+
+### `GET /api/admin/overview` — aggregates only
+Tenants/services totals, requests/blocked/error-rate/avg-latency over the last
+24h, Redis + DB health, a 60-minute platform-wide requests series, and tenants
+at ≥80% of their **plan's daily request quota** (`app/core/plans.py` — a plain
+dict, not a billing system, per the brief). Every field is a count or an
+average; no route in `app/api/routers/admin.py` can return a path, client IP,
+or any other per-request detail — `test_overview_reflects_traffic_with_no_per_request_detail`
+asserts the seeded upstream path never appears in the response body. The
+endpoint degrades (`db_ok`/`redis_ok: false`) instead of 500ing when a backend
+is unhealthy, so the ops view itself stays up during partial outages.
+
+### Frontend: a real design system, not just "make it pretty"
+Added `components/ui/` (Button, Card, Badge, StatTile, StatusPill, Skeleton,
+EmptyState, Toast, CopyButton) and a `tailwind.config.js` token layer (brand
+palette, shadows, motion). Applied consistently across both the tenant
+dashboard (revamped: collapsible create-service form, service cards with
+copy-to-clipboard gateway id, inline delete confirmation, toasts instead of
+silent failures, skeleton loading states) and the new admin dashboard, so the
+two feel like one product rather than a bolted-on internal tool. Admin has its
+own token (`gk_admin_token`, separate from the tenant's `gk_token`) and its own
+visually distinct login screen — deliberately, so a tenant user is never
+confused about which account they're using.
+
+### Real end-to-end verification (not just unit tests)
+Got a real headless Chromium working (extracted `libnspr4`/`libnss3`/`libasound2`
+from `.deb` packages with `dpkg -x` — no root needed — since the sandboxed
+Playwright install lacked them) and drove the actual running app: registered a
+tenant, created a service pointed at `https://httpbin.org`, minted a key, sent
+real requests through `/gw/{public_id}/...`, and watched them land in the live
+WebSocket feed and the usage chart *in the same session*, then confirmed the
+same 6 requests rolled up correctly into the platform admin's 24h totals and
+60-minute series — proving the gateway → rate-limiter → RequestLog → WS
+broadcast → tenant dashboard → admin aggregate pipeline end to end, live.
+
+This surfaced one real UX bug (below) and confirmed one apparent bug was in
+fact deliberate: a login attempt with a never-registered email returns the
+same "Invalid email or password" as a wrong password for an existing one —
+this is intentional (prevents user/email enumeration), not a malfunction.
+But the page gave a new visitor no clear path to "I don't have an account yet,"
+so:
+- `LoginPage` now uses a two-tab **Sign in / Create account** switcher instead
+  of a small footnote link, and shows an inline "New here? Create an account"
+  hint directly under a login error.
+- Switching tabs now clears the password field (was previously carried over).
+- The "new API key" reveal banner's amber tone was too pale to read as urgent;
+  strengthened it.
+
 ## Known simplifications (demo-scale vs production)
+- Admin overview recomputes every field on each request (no caching) — fine at
+  this data volume; would want a short cache or pre-aggregation at real scale.
+- Plan quotas are a static in-code dict, not stored per-tenant or editable via API.
 - Live feed is in-process fan-out — single uvicorn worker only (see above).
 - WebSocket JWT is passed in the query string.
 - Stats query scans `request_logs` per call — fine at short retention; at scale

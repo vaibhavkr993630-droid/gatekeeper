@@ -16,9 +16,15 @@ full product vision and `PROGRESS.md` for current build status.
 - Frontend: React + TypeScript, TanStack Query, Tailwind, Recharts
 - Infra: Docker Compose, GitHub Actions CI
 
-## Two auth concerns (kept separate on purpose)
-1. **Dashboard auth** — JWT. Tenant users log in to manage their services.
+## Three separate identities (kept apart on purpose)
+1. **Tenant dashboard auth** — JWT, signed with `SECRET_KEY`. Tenant users log in
+   to manage their services.
 2. **Gateway auth** — per-service API keys authenticating traffic through the proxy.
+3. **Platform admin auth** — JWT signed with a **different key**, `ADMIN_SECRET_KEY`.
+   No public signup; provision the first admin with:
+   ```bash
+   cd backend && python -m scripts.create_admin --email you@company.com
+   ```
 
 ## API (so far)
 
@@ -38,6 +44,14 @@ Dashboard API, JWT bearer unless noted:
 | GET | `/api/services/{id}/stats?minutes=N` | per-minute request/block series + totals |
 | WS | `/ws/feed?token=<jwt>` | live per-tenant traffic feed — isolation enforced server-side |
 | GET | `/health` | no auth; reports Redis reachability |
+
+Admin API (`ADMIN_SECRET_KEY`-signed bearer, separate from the tenant JWT above):
+
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/api/admin/auth/login` | → admin access token (no public registration) |
+| GET | `/api/admin/me` | current admin |
+| GET | `/api/admin/overview` | system-wide aggregates only — see below |
 
 Rate-limit rule: `algorithm` (`token_bucket` \| `sliding_window_counter`), `limit`,
 `window_seconds`, optional `burst` (≥ `limit`). API keys are stored as SHA-256 hashes.
@@ -83,6 +97,15 @@ in-process `ConnectionManager` (`{tenant_id: {sockets}}`). A socket's tenant com
 from its verified JWT — never from the client — so a tenant only ever sees its own
 traffic. Single-process fan-out for the demo; at scale each node would publish to
 Redis pub/sub (or a message bus) and re-fan-out locally.
+
+## Platform admin (`app/api/routers/admin.py`)
+
+Separate identity from tenants (see above) and separate visibility: `/api/admin/overview`
+returns tenant/service counts, 24h request/blocked/error-rate/avg-latency, Redis + DB
+health, a platform-wide 60-minute requests series, and tenants at ≥80% of their plan's
+daily request quota (`app/core/plans.py`) — **aggregates only**, never a path, client IP,
+or any other per-request detail. The endpoint degrades (`db_ok`/`redis_ok: false`)
+rather than failing outright if a backend is unhealthy.
 
 ## Local dev
 

@@ -10,6 +10,12 @@ class Settings(BaseSettings):
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 60
 
+    # Signed with a *different* key than tenant tokens (app/core/security.py) —
+    # not just a different claim. A leaked/forged tenant token cannot be replayed
+    # as an admin token because the signature wouldn't verify against this key.
+    admin_secret_key: str = "dev-admin-secret-change-me"
+    admin_access_token_expire_minutes: int = 60
+
     database_url: str = "postgresql+asyncpg://gatekeeper:gatekeeper@localhost:5432/gatekeeper"
     redis_url: str = "redis://localhost:6379/0"
 

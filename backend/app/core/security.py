@@ -39,6 +39,28 @@ def decode_access_token(token: str) -> dict:
     return jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
 
 
+# --- Platform admin tokens ---------------------------------------------------
+# Deliberately signed with a *different* secret than tenant tokens. This isn't
+# just "a different claim to check" — an admin token is cryptographically
+# unforgeable from a tenant token, and vice versa, even if one secret leaks.
+
+
+def create_admin_token(*, admin_id: int) -> str:
+    now = datetime.now(UTC)
+    payload = {
+        "sub": str(admin_id),
+        "scope": "admin",
+        "iat": now,
+        "exp": now + timedelta(minutes=settings.admin_access_token_expire_minutes),
+    }
+    return jwt.encode(payload, settings.admin_secret_key, algorithm=settings.algorithm)
+
+
+def decode_admin_token(token: str) -> dict:
+    """Raises JWTError on any invalid/expired token."""
+    return jwt.decode(token, settings.admin_secret_key, algorithms=[settings.algorithm])
+
+
 # --- Gateway API keys -------------------------------------------------------
 # Distinct from JWT: long-lived, machine-to-machine, scoped to one service.
 # We store only a SHA-256 hash + a display hint; the plaintext is shown once.
@@ -72,7 +94,9 @@ __all__ = [
     "GeneratedApiKey",
     "JWTError",
     "create_access_token",
+    "create_admin_token",
     "decode_access_token",
+    "decode_admin_token",
     "generate_api_key",
     "hash_api_key",
     "hash_password",
