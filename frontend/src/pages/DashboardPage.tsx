@@ -1,7 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { authApi, clearToken } from "../api";
+import AppShell from "../components/AppShell";
 import ServicesPanel from "../components/ServicesPanel";
+import Badge from "../components/ui/Badge";
+import { SkeletonCard } from "../components/ui/Skeleton";
 
 export default function DashboardPage() {
   const navigate = useNavigate();
@@ -12,7 +15,6 @@ export default function DashboardPage() {
     navigate("/login");
   }
 
-  if (isLoading) return <div className="p-8 text-sm text-slate-500">Loading…</div>;
   if (isError) {
     clearToken();
     navigate("/login");
@@ -20,22 +22,25 @@ export default function DashboardPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-100">
-      <header className="flex items-center justify-between border-b bg-white px-6 py-3">
-        <span className="font-semibold">GateKeeper</span>
-        <div className="flex items-center gap-4 text-sm">
-          <span className="text-slate-500">
-            {data?.email} · {data?.tenant.name} ({data?.tenant.plan})
-          </span>
-          <button onClick={logout} className="text-slate-500 underline">
-            Log out
-          </button>
+    <AppShell
+      subtitle={data?.tenant.name}
+      identity={data ? `${data.email}` : undefined}
+      onLogout={logout}
+    >
+      {isLoading ? (
+        <div className="grid gap-4 sm:grid-cols-2">
+          <SkeletonCard />
+          <SkeletonCard />
         </div>
-      </header>
-
-      <main className="mx-auto max-w-4xl p-6">
-        <ServicesPanel />
-      </main>
-    </div>
+      ) : (
+        <>
+          <div className="mb-6 flex items-center gap-2">
+            <h1 className="text-lg font-semibold text-slate-900">{data?.tenant.name}</h1>
+            <Badge tone="brand">{data?.tenant.plan} plan</Badge>
+          </div>
+          <ServicesPanel />
+        </>
+      )}
+    </AppShell>
   );
 }

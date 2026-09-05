@@ -11,8 +11,11 @@ import {
   YAxis,
 } from "recharts";
 import { servicesApi } from "../api";
+import StatTile from "./ui/StatTile";
+import { SkeletonCard } from "./ui/Skeleton";
 
-const tick = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+const tick = (iso: string) =>
+  new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
 export default function UsageCharts({ serviceId }: { serviceId: number }) {
   const { data } = useQuery({
@@ -21,7 +24,17 @@ export default function UsageCharts({ serviceId }: { serviceId: number }) {
     refetchInterval: 5000,
   });
 
-  if (!data) return <div className="text-sm text-slate-500">Loading stats…</div>;
+  if (!data) {
+    return (
+      <div className="space-y-4">
+        <div className="grid grid-cols-3 gap-3">
+          <SkeletonCard />
+          <SkeletonCard />
+          <SkeletonCard />
+        </div>
+      </div>
+    );
+  }
 
   const series = data.series.map((p) => ({
     ...p,
@@ -32,10 +45,10 @@ export default function UsageCharts({ serviceId }: { serviceId: number }) {
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-3 gap-3 text-center">
-        <Stat label="requests / 60 min" value={requests} />
-        <Stat label="blocked" value={blocked} tone={blocked ? "warn" : undefined} />
-        <Stat label="block rate" value={`${(block_rate * 100).toFixed(1)}%`} />
+      <div className="grid grid-cols-3 gap-3">
+        <StatTile label="requests / 60m" value={requests} />
+        <StatTile label="blocked" value={blocked} tone={blocked ? "danger" : "default"} />
+        <StatTile label="block rate" value={`${(block_rate * 100).toFixed(1)}%`} />
       </div>
 
       <ChartCard title="Requests per minute">
@@ -55,7 +68,7 @@ export default function UsageCharts({ serviceId }: { serviceId: number }) {
           <XAxis dataKey="t" fontSize={11} />
           <YAxis fontSize={11} allowDecimals={false} width={28} />
           <Tooltip />
-          <Bar dataKey="blocked" fill="#dc2626" />
+          <Bar dataKey="blocked" fill="#dc2626" radius={[3, 3, 0, 0]} />
         </BarChart>
       </ChartCard>
 
@@ -67,19 +80,10 @@ export default function UsageCharts({ serviceId }: { serviceId: number }) {
   );
 }
 
-function Stat({ label, value, tone }: { label: string; value: number | string; tone?: "warn" }) {
-  return (
-    <div className="rounded-lg border bg-white p-3">
-      <div className={`text-xl font-semibold ${tone === "warn" ? "text-red-600" : ""}`}>{value}</div>
-      <div className="text-xs text-slate-500">{label}</div>
-    </div>
-  );
-}
-
 function ChartCard({ title, children }: { title: string; children: React.ReactElement }) {
   return (
-    <div className="rounded-lg border bg-white p-3">
-      <div className="mb-2 text-sm font-medium">{title}</div>
+    <div className="rounded-xl border border-slate-200 bg-white p-3 shadow-card">
+      <div className="mb-2 text-sm font-medium text-slate-700">{title}</div>
       <div className="h-40">
         <ResponsiveContainer width="100%" height="100%">
           {children}

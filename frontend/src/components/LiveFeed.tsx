@@ -1,4 +1,16 @@
 import { useLiveFeed } from "../hooks/useLiveFeed";
+import Badge from "./ui/Badge";
+import Card, { CardHeader } from "./ui/Card";
+import { SkeletonRow } from "./ui/Skeleton";
+import StatusPill from "./ui/StatusPill";
+
+const statusTone = { open: "success", connecting: "warning", closed: "danger" } as const;
+
+function methodTone(method: string) {
+  if (method === "GET") return "brand";
+  if (method === "DELETE") return "danger";
+  return "neutral";
+}
 
 export default function LiveFeed({ serviceId }: { serviceId?: number }) {
   const { events, status } = useLiveFeed();
@@ -7,44 +19,48 @@ export default function LiveFeed({ serviceId }: { serviceId?: number }) {
     .reverse();
 
   return (
-    <div className="rounded-lg border bg-white">
-      <div className="flex items-center justify-between border-b px-4 py-2 text-sm">
-        <span className="font-medium">Live traffic</span>
-        <span
-          className={
-            status === "open"
-              ? "text-emerald-600"
-              : status === "connecting"
-                ? "text-amber-600"
-                : "text-red-600"
-          }
-        >
-          ● {status}
-        </span>
-      </div>
-      <ul className="max-h-80 divide-y overflow-y-auto text-xs">
-        {shown.length === 0 && (
-          <li className="p-4 text-center text-slate-400">Waiting for traffic…</li>
+    <Card className="flex flex-col">
+      <CardHeader>
+        <span className="text-sm font-medium text-slate-700">Live traffic</span>
+        <StatusPill tone={statusTone[status]} pulse={status === "connecting"}>
+          {status}
+        </StatusPill>
+      </CardHeader>
+      <ul className="scroll-thin max-h-80 divide-y divide-slate-100 overflow-y-auto text-xs">
+        {status === "connecting" && shown.length === 0 && (
+          <>
+            <SkeletonRow />
+            <SkeletonRow />
+            <SkeletonRow />
+          </>
+        )}
+        {status !== "connecting" && shown.length === 0 && (
+          <li className="px-4 py-10 text-center text-slate-400">
+            Waiting for traffic — hit your gateway URL to see it appear here live.
+          </li>
         )}
         {shown.map((e, i) => (
-          <li key={i} className="flex items-center gap-3 px-4 py-1.5 font-mono">
+          <li
+            key={i}
+            className={`flex items-center gap-2.5 px-4 py-2 font-mono ${i === 0 ? "animate-fade-in" : ""}`}
+          >
             <span
-              className={e.allowed ? "text-emerald-600" : "text-red-600"}
+              className={`h-1.5 w-1.5 shrink-0 rounded-full ${e.allowed ? "bg-emerald-500" : "bg-red-500"}`}
               title={e.allowed ? "allowed" : "blocked"}
-            >
-              {e.allowed ? "✔" : "✖"}
+            />
+            <span className={`w-9 shrink-0 ${e.allowed ? "text-slate-500" : "font-semibold text-red-600"}`}>
+              {e.status_code}
             </span>
-            <span className="w-10 text-slate-500">{e.status_code}</span>
-            <span className="w-12 text-slate-700">{e.method}</span>
-            <span className="flex-1 truncate">{e.path}</span>
-            <span className="text-slate-400">{e.client_ip}</span>
-            {e.latency_ms != null && <span className="text-slate-400">{e.latency_ms}ms</span>}
-            <span className="text-slate-400">
-              {new Date(e.at).toLocaleTimeString()}
-            </span>
+            <Badge tone={methodTone(e.method)}>{e.method}</Badge>
+            <span className="flex-1 truncate text-slate-700">{e.path}</span>
+            <span className="hidden shrink-0 text-slate-400 sm:inline">{e.client_ip}</span>
+            {e.latency_ms != null && (
+              <span className="hidden shrink-0 text-slate-400 sm:inline">{e.latency_ms}ms</span>
+            )}
+            <span className="shrink-0 text-slate-400">{new Date(e.at).toLocaleTimeString()}</span>
           </li>
         ))}
       </ul>
-    </div>
+    </Card>
   );
 }
