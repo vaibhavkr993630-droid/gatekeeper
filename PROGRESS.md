@@ -3,7 +3,7 @@
 Distributed rate-limiting & API gateway platform. See `GATEKEEPER_BRIEF.md` for full vision.
 
 ## Active phase
-Phase 6 — Platform Admin View (COMPLETE, pending review — NOT committed; 2 commits planned)
+Phase 7 — Hardening (COMPLETE, pending review — NOT committed)
 
 ## Phase status
 - [x] Phase 1 — Foundation: Tenant model, JWT auth (register/login), dashboard shell, Alembic, pytest
@@ -12,7 +12,7 @@ Phase 6 — Platform Admin View (COMPLETE, pending review — NOT committed; 2 c
 - [x] Phase 4 — Reverse-proxy gateway: API-key auth → rate check → httpx forward / 429; RequestLog
 - [x] Phase 5 — Per-tenant WebSocket live feed + usage charts (stats endpoint)
 - [x] Phase 6 — Platform admin auth + system-wide overview; frontend design-system pass
-- [ ] Phase 7 — Hardening (Docker Compose, CI, Sentry, tests)
+- [x] Phase 7 — Full-stack Docker, structured logging, Sentry, SSRF guard, CI expansion, more tests
 - [ ] Phase 8 — Deploy
 
 ## Phase 1 — what was built and why
@@ -327,7 +327,99 @@ so:
 - The "new API key" reveal banner's amber tone was too pale to read as urgent;
   strengthened it.
 
+## Phase 7 — what was built and why
+
+### Full-stack Docker
+`backend/Dockerfile` (python:3.12-slim + curl for the `HEALTHCHECK`) and
+`frontend/Dockerfile` (multi-stage: `node:20-alpine` build → `nginx:1.27-alpine`
+serving the static bundle). `frontend/nginx.conf` reverse-proxies `/api`, `/gw`,
+and `/ws` (with the `Upgrade`/`Connection` headers a WebSocket needs) to the
+backend container — the browser only ever talks to one origin, so the
+containerized deployment needs **no CORS** at all (CORS only matters for the
+`vite`-dev-server-on-a-different-port workflow). `docker-entrypoint.sh` runs
+`alembic upgrade head` before `uvicorn` starts. `docker-compose.yml` now brings
+up the whole stack (`docker compose up -d --build`); `docker compose up -d db
+redis` (unchanged) still works for the hot-reload local-dev loop.
+
+### Structured logging + request correlation
+`app/core/logging.py` — plain text locally (readable in a terminal, the
+default), one JSON object per line when `LOG_JSON=true` (the container
+default; verified live in `docker compose logs backend` — see below).
+`app/core/request_context.py` — a `ContextVar`-backed middleware gives every
+request a `request_id` (reuses an inbound `X-Request-ID` if the caller sent
+one) and echoes it in the response header; a logging `Filter` stamps it onto
+any log record emitted *during* that request's handling. Caveat found by
+actually reading the container logs: uvicorn's own access-log line is written
+by the ASGI server after the middleware's `finally` already reset the
+context var, so it always shows `request_id: "-"` — only *our* application/
+gateway log calls made while handling the request carry the real id. Good
+enough for its purpose (tracing one request through our own logic) but worth
+knowing precisely why, not just that it "mostly works".
+
+### Sentry — opt-in, not on by default
+`app/core/sentry.py::init_sentry()` is a no-op unless `SENTRY_DSN` is set, so
+local dev and CI never need a Sentry account or a network call to Sentry at
+startup. `sentry-sdk`'s auto-instrumentation picks up the ASGI app once
+initialized before the app is constructed.
+
+### SSRF guard on `upstream_url`
+`app/core/net_safety.py::assert_public_upstream` — rejects loopback, private
+(`10.x`/`172.16-31.x`/`192.168.x`), link-local (`169.254.x` — the cloud
+metadata-endpoint range, the single most common real-world SSRF target),
+reserved, and multicast targets. Literal IPs are checked purely computationally
+(no I/O); hostnames are resolved via `socket.getaddrinfo` off the event loop
+(`asyncio.to_thread`, since DNS resolution is blocking) and every returned
+address is checked. Wired into `POST/PATCH /services` behind
+`settings.block_private_upstreams` — **off by default**, because a demo/local
+upstream is very often loopback (the whole test suite's stub servers, for a
+start) and this project's pattern throughout has been "safe default for a real
+deployment, explicit opt-in flag, tested when the flag is on" (see
+`rate_limit_fail_open`, `trust_forwarded_for`). Documented as best-effort: it
+checks at creation time, so a hostname that later re-resolves to a private
+address ("DNS rebinding") isn't caught — a production version would pin the
+resolved IP at connection time instead of trusting a one-time hostname check.
+
+### CI expanded
+Added a `frontend` job (`npm ci && npm run build`, which is `tsc -b && vite
+build` — typecheck and build in one) and a `docker` job that builds both
+Dockerfiles, gated on both other jobs passing. CI now proves the containers
+this README tells you to run actually build, not just that the source compiles.
+
+### Tests — 96 total (was 73)
+`test_net_safety.py` (SSRF logic, network-free for every literal-IP case),
+`test_ssrf_guard.py` (the guard wired into the API, on vs. off), `test_logging.py`
+(JSON formatter shape + exception formatting + request-id header on every
+response, including echoing a caller-supplied one). Concurrency and tenant
+data-isolation coverage the brief calls out for this phase was already in place
+from earlier phases — `tests/integration/test_rate_limit.py` (250-way concurrent
+checks land exactly on the limit) and `tests/integration/test_ws_feed.py`
+(`test_gateway_request_reaches_only_the_owning_tenant` — tenant B's socket gets
+zero events from tenant A's traffic) — noted here rather than duplicated.
+
+### Verified live: `docker compose up -d --build`, not just `docker build`
+Ran the actual full stack, not only confirmed the images build. Found and fixed
+a real bug this way: the frontend container reported unhealthy even though
+`curl http://localhost:8080/` worked fine from the host. Cause — Alpine/musl
+resolves `localhost` to `::1` first, nginx's config here only binds IPv4 `:80`,
+so the container's *own* healthcheck (`wget http://localhost/`, running inside
+the container) hit "connection refused" while every *external* request (through
+the published port, arriving as IPv4) worked. Fixed by pointing the healthcheck
+at `127.0.0.1` explicitly. Confirmed after the fix: all four containers
+`healthy`; migrations ran automatically on backend boot (`alembic.runtime
+.migration` log lines before the app started); backend logs are valid JSON
+per line with `LOG_JSON=true`; `curl :8080/api/services` (no token) correctly
+reverse-proxied to the backend and got `401`, proving the nginx → backend path
+works end to end.
+
 ## Known simplifications (demo-scale vs production)
+- SSRF guard is best-effort (no DNS-rebinding protection) and off by default —
+  set `BLOCK_PRIVATE_UPSTREAMS=true` for a real deployment.
+- Structured logs go to stdout only; no shipping to a log platform configured
+  (that's the "bring your own aggregator" half of structured logging).
+- `docker-entrypoint.sh` runs migrations on every container boot — fine for one
+  instance, would race across N replicas booting together in production.
+- Sentry integration is wired but never exercised against a live DSN in this
+  environment (no Sentry account here) — it's a no-op until one is provided.
 - Admin overview recomputes every field on each request (no caching) — fine at
   this data volume; would want a short cache or pre-aggregation at real scale.
 - Plan quotas are a static in-code dict, not stored per-tenant or editable via API.
@@ -342,8 +434,10 @@ so:
 - Request body is buffered, not streamed (fine for API payloads; note for large uploads).
 - `api_key.last_used_at` is touched on every request — production should throttle
   (skip when recent) to avoid a write per request.
-- `RequestLog` has no retention/cleanup job yet — Phase 7.
-- `upstream_url` isn't validated against SSRF (private IPs, localhost) — Phase 7.
+- `RequestLog` has no retention/cleanup job yet — no phase currently scheduled
+  for it; would be a cron/scheduled task deleting rows past a retention window.
+- `upstream_url` SSRF validation exists (`net_safety.py`, Phase 7) but is off by
+  default — see the Phase 7 known-simplifications entries above.
 - One rule per service enforced only by the unique index on `rate_limit_rules.service_id`.
 - App Redis client uses redis-py's default (unbounded) connection pool. Production
   should set an explicit bounded pool sized to the worker's concurrency.

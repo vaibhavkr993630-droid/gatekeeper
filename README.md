@@ -8,13 +8,55 @@ requests to their real backend.
 This is a learning-focused infrastructure project. See `GATEKEEPER_BRIEF.md` for the
 full product vision and `PROGRESS.md` for current build status.
 
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph Tenants
+        TenantApp["Tenant's app / service"]
+        Browser["Tenant dashboard (browser)"]
+    end
+    AdminBrowser["Platform admin (browser)"]
+
+    subgraph GateKeeper["GateKeeper (FastAPI)"]
+        MgmtAPI["/api — management API (JWT)"]
+        AdminAPI["/api/admin — ops view (admin JWT, separate key)"]
+        Feed["/ws/feed — live traffic (JWT-scoped)"]
+        GW["/gw/{public_id} — gateway data plane (API key)"]
+    end
+
+    Redis[("Redis\natomic rate-limit counters")]
+    Postgres[("Postgres\ntenants · services · keys · RequestLog")]
+    Upstream["Tenant's real backend"]
+
+    Browser -- "login, manage services" --> MgmtAPI
+    Browser <-- "live events" --> Feed
+    AdminBrowser -- "aggregates only" --> AdminAPI
+
+    TenantApp -- "X-API-Key" --> GW
+    GW -- "1 Lua EVALSHA" --> Redis
+    GW -- "forward if allowed" --> Upstream
+    GW -. "background: log + broadcast" .-> Postgres
+    GW -. background .-> Feed
+
+    MgmtAPI --> Postgres
+    AdminAPI --> Postgres
+    AdminAPI -- "health check" --> Redis
+```
+
+Two data stores, two roles: **Postgres** is the system of record (tenants, services,
+policies, keys, request history); **Redis** is scoped to one job — atomic distributed
+rate-limit counters — never caching or pub/sub. Three separate identities gate the
+three planes above (see next section).
+
 ## Stack
 - Backend: Python 3.12, FastAPI, SQLAlchemy 2.0 (async), PostgreSQL, Alembic, Pydantic v2
 - Rate-limit core: Redis + Lua scripting (atomic check-and-increment)
 - Reverse proxy: httpx (async, streaming)
 - Real-time: FastAPI WebSockets (per-tenant scoped)
 - Frontend: React + TypeScript, TanStack Query, Tailwind, Recharts
-- Infra: Docker Compose, GitHub Actions CI
+- Infra: Docker Compose (full stack), GitHub Actions CI (backend + frontend + image builds),
+  structured JSON logging with request-id correlation, Sentry (opt-in)
 
 ## Three separate identities (kept apart on purpose)
 1. **Tenant dashboard auth** — JWT, signed with `SECRET_KEY`. Tenant users log in
@@ -107,7 +149,25 @@ daily request quota (`app/core/plans.py`) — **aggregates only**, never a path,
 or any other per-request detail. The endpoint degrades (`db_ok`/`redis_ok: false`)
 rather than failing outright if a backend is unhealthy.
 
+## Hardening (`app/core/`)
+
+- **Structured logging** (`logging.py`) — plain text locally (`LOG_JSON=false`, the
+  default, for a readable terminal), one JSON object per line in containers
+  (`LOG_JSON=true`). Every line — ours and uvicorn's — carries the same `request_id`
+  via a context-var-backed filter, and every response echoes it back as
+  `X-Request-ID` (`request_context.py`), so one request's logs are one `grep` away.
+- **Sentry** (`sentry.py`) — strictly opt-in; a no-op unless `SENTRY_DSN` is set, so
+  local dev and CI never need a Sentry account.
+- **SSRF guard** (`net_safety.py`) — a tenant's `upstream_url` can be checked against
+  loopback/private/link-local/metadata-endpoint addresses before a service is
+  created or updated. Off by default (`BLOCK_PRIVATE_UPSTREAMS=false`) since a local
+  dev/demo upstream is very often loopback; turn it on in production. Best-effort —
+  documented in `net_safety.py` why it doesn't stop DNS rebinding.
+
 ## Local dev
+
+Backend + frontend dev servers against just Postgres/Redis in Docker (fastest
+inner loop, hot reload on both sides):
 
 ```bash
 cd backend
@@ -120,16 +180,31 @@ uvicorn app.main:app --reload
 pytest
 ```
 
-Frontend:
-
 ```bash
 cd frontend
 npm install
-npm run dev          # proxies /api to localhost:8000
+npm run dev          # proxies /api, /gw, /ws to localhost:8000
+```
+
+Or the full stack in containers (what a deploy actually runs):
+
+```bash
+docker compose up -d --build
+# frontend: http://localhost:8080 (nginx, reverse-proxies /api,/gw,/ws to backend)
+# backend:  http://localhost:8000 (migrations run automatically on boot)
 ```
 
 ## Scaling notes (what would change at real scale)
-- Redis colocated with gateway nodes; tuned connection pools.
+- Redis colocated with gateway nodes; an explicit bounded connection pool sized to
+  worker concurrency (currently redis-py's unbounded default).
 - Postgres read replicas for dashboard/analytics queries.
-- RequestLog moved to a TSDB / short-retention store, not the primary DB.
+- `RequestLog` moved to a TSDB / short-retention store, not the primary DB; the admin
+  stats queries pre-aggregated into rollups instead of scanning raw rows.
+- Live feed fanned out via Redis pub/sub (or a message bus) across gateway/dashboard
+  nodes instead of one process's in-memory `ConnectionManager`.
+- Migrations run as a separate release step, not on every container boot (the
+  `docker-entrypoint.sh` here is a single-instance-demo convenience).
 - Multi-region gateway with regional Redis (out of scope for v1).
+
+The full, phase-by-phase list of every demo-scale simplification and the reasoning
+behind each one lives in `PROGRESS.md`.

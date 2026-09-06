@@ -25,5 +25,40 @@ services:
       timeout: 3s
       retries: 10
 
+  # --- full stack (optional — `docker compose up -d db redis` is enough for
+  # local dev against `uvicorn --reload` / `npm run dev`) ---
+
+  backend:
+    build: ./backend
+    environment:
+      SECRET_KEY: ${SECRET_KEY:-dev-secret-change-me}
+      ADMIN_SECRET_KEY: ${ADMIN_SECRET_KEY:-dev-admin-secret-change-me}
+      DATABASE_URL: postgresql+asyncpg://gatekeeper:gatekeeper@db:5432/gatekeeper
+      REDIS_URL: redis://redis:6379/0
+      CORS_ORIGINS: http://localhost:8080
+      ENVIRONMENT: production
+      LOG_JSON: "true"
+      SENTRY_DSN: ${SENTRY_DSN:-}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
 volumes:
   pgdata:
