@@ -1,6 +1,10 @@
+import asyncio
+
 from fastapi import APIRouter, HTTPException, status
 
 from app.api.deps import CurrentUser, DbDep, OwnedService
+from app.core.config import settings
+from app.core.net_safety import UnsafeUpstreamError, assert_public_upstream
 from app.crud import api_key as crud_api_key
 from app.crud import service as crud_service
 from app.schemas.service import (
@@ -16,6 +20,17 @@ from app.schemas.service import (
 router = APIRouter(prefix="/services", tags=["services"])
 
 
+async def _guard_upstream(url: str) -> None:
+    """DNS resolution is blocking I/O — off the event loop via a thread. No-op
+    unless `block_private_upstreams` is on (see config.py)."""
+    if not settings.block_private_upstreams:
+        return
+    try:
+        await asyncio.to_thread(assert_public_upstream, url)
+    except UnsafeUpstreamError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+
+
 @router.get("", response_model=list[ServiceOut])
 async def list_services(current_user: CurrentUser, db: DbDep) -> list[ServiceOut]:
     return await crud_service.list_services(db, current_user.tenant_id)
@@ -23,6 +38,7 @@ async def list_services(current_user: CurrentUser, db: DbDep) -> list[ServiceOut
 
 @router.post("", response_model=ServiceOut, status_code=status.HTTP_201_CREATED)
 async def create_service(body: ServiceCreate, current_user: CurrentUser, db: DbDep) -> ServiceOut:
+    await _guard_upstream(str(body.upstream_url))
     return await crud_service.create_service(db, tenant_id=current_user.tenant_id, data=body)
 
 
@@ -33,6 +49,8 @@ async def get_service(service: OwnedService) -> ServiceOut:
 
 @router.patch("/{service_id}", response_model=ServiceOut)
 async def update_service(body: ServiceUpdate, service: OwnedService, db: DbDep) -> ServiceOut:
+    if body.upstream_url is not None:
+        await _guard_upstream(str(body.upstream_url))
     return await crud_service.update_service(db, service, body)
 
 
