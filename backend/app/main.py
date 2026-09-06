@@ -5,10 +5,16 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routers import admin, auth, services, stats
 from app.core.config import settings
+from app.core.logging import setup_logging
 from app.core.redis import close_redis, get_redis
+from app.core.request_context import RequestIdMiddleware
+from app.core.sentry import init_sentry
 from app.gateway import router as gateway_router
 from app.gateway.client import close_http_client
 from app.ws import router as ws_router
+
+setup_logging()
+init_sentry()
 
 
 @asynccontextmanager
@@ -20,6 +26,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="GateKeeper", version="0.1.0", lifespan=lifespan)
 
+app.add_middleware(RequestIdMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
@@ -43,4 +50,8 @@ async def health() -> dict[str, object]:
         redis_ok = True
     except Exception:  # noqa: BLE001 — health check must never raise
         redis_ok = False
-    return {"status": "ok" if redis_ok else "degraded", "redis": redis_ok}
+    return {
+        "status": "ok" if redis_ok else "degraded",
+        "redis": redis_ok,
+        "environment": settings.environment,
+    }

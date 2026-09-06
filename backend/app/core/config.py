@@ -31,6 +31,19 @@ class Settings(BaseSettings):
     # Only turn on behind a proxy that overwrites the header (a raw client can spoof it).
     trust_forwarded_for: bool = True
 
+    # --- hardening (Phase 7) ---
+    environment: str = "development"
+    log_level: str = "INFO"
+    # Structured (JSON) logs — on for containers/production log aggregation,
+    # off by default so `uvicorn --reload` output stays human-readable locally.
+    log_json: bool = False
+    sentry_dsn: str | None = None
+    sentry_traces_sample_rate: float = 0.0
+    # SSRF guard for tenant-supplied upstream_url: reject loopback/private/link-local
+    # targets. Off by default — a local dev/demo upstream is very often loopback
+    # (e.g. the test suite's stub servers); turn this on in production.
+    block_private_upstreams: bool = False
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
