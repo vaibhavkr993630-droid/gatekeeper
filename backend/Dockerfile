@@ -14,10 +14,14 @@ COPY docker-entrypoint.sh ./
 
 RUN pip install --no-cache-dir . && chmod +x docker-entrypoint.sh
 
+# PORT is injected by most PaaS (Railway, Render, ...); defaults to 8000 locally.
+ENV PORT=8000
 EXPOSE 8000
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=5 \
-  CMD curl -sf http://localhost:8000/health || exit 1
+  CMD curl -sf "http://localhost:${PORT}/health" || exit 1
 
 ENTRYPOINT ["./docker-entrypoint.sh"]
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# --proxy-headers + --forwarded-allow-ips: trust X-Forwarded-Proto/-For from the
+# platform's edge proxy so redirects use https and the logged scheme is right.
+CMD uvicorn app.main:app --host 0.0.0.0 --port "${PORT:-8000}" --proxy-headers --forwarded-allow-ips='*'

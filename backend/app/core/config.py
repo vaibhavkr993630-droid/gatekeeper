@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -44,9 +45,28 @@ class Settings(BaseSettings):
     # (e.g. the test suite's stub servers); turn this on in production.
     block_private_upstreams: bool = False
 
+    # --- deploy (Phase 8) ---
+    # Host header allowlist (TrustedHostMiddleware). "*" disables the check;
+    # set the deployed domain(s) in production to block Host-header spoofing.
+    allowed_hosts: str = "*"
+
+    @field_validator("database_url", mode="after")
+    @classmethod
+    def _use_async_driver(cls, v: str) -> str:
+        # managed-Postgres providers hand you a bare `postgres://` / `postgresql://`
+        # URL; SQLAlchemy's async engine needs the driver named explicitly.
+        for prefix in ("postgresql+asyncpg://", "postgres://", "postgresql://"):
+            if v.startswith(prefix):
+                return "postgresql+asyncpg://" + v[len(prefix):]
+        return v
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def allowed_host_list(self) -> list[str]:
+        return [h.strip() for h in self.allowed_hosts.split(",") if h.strip()] or ["*"]
 
 
 @lru_cache
