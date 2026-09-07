@@ -194,6 +194,34 @@ docker compose up -d --build
 # backend:  http://localhost:8000 (migrations run automatically on boot)
 ```
 
+## Deploy
+
+Both services build from their `Dockerfile` (`backend/railway.json`,
+`frontend/railway.json` pin the builder + health check). The intended topology:
+
+- **backend** — private service, managed Postgres + Redis attached, migrations run
+  on boot. Env: `SECRET_KEY`, `ADMIN_SECRET_KEY` (distinct, `openssl rand -hex 32`
+  each), `DATABASE_URL` + `REDIS_URL` (from the managed plugins — a bare
+  `postgres://` URL is auto-upgraded to the async driver), `ENVIRONMENT=production`,
+  `LOG_JSON=true`, `BLOCK_PRIVATE_UPSTREAMS=true`.
+- **frontend** — public service (nginx). Env: `BACKEND_UPSTREAM=<backend private
+  host>:8000`. It reverse-proxies `/api`, `/gw`, `/ws` to the backend over the
+  private network, so the browser stays single-origin and **no CORS or public
+  backend URL is needed**. `PORT` is injected by the platform; the nginx config is
+  a template (`envsubst` at startup) so both `PORT` and `BACKEND_UPSTREAM` are
+  substituted in.
+
+`ALLOWED_HOSTS` (Host-header allowlist via `TrustedHostMiddleware`) defaults to
+`*` / disabled — set it to the deployed domain(s) to turn the check on.
+
+**Smoke test** — proves the whole pipeline against a live URL:
+
+```bash
+python -m scripts.smoke_test https://<deployed-frontend-url>
+# registers a tenant, points a service at httpbin.org, mints a key, fires 20
+# requests at a limit of 5/60s, asserts 5×200 + 15×429, then that the bucket refills
+```
+
 ## Scaling notes (what would change at real scale)
 - Redis colocated with gateway nodes; an explicit bounded connection pool sized to
   worker concurrency (currently redis-py's unbounded default).

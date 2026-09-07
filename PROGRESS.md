@@ -3,7 +3,8 @@
 Distributed rate-limiting & API gateway platform. See `GATEKEEPER_BRIEF.md` for full vision.
 
 ## Active phase
-Phase 7 — Hardening (COMPLETE, pending review — NOT committed)
+Phase 8 — Deploy (IN PROGRESS — prep done + verified locally; cloud deploy pending)
+Phase 7 — Hardening (COMPLETE, STAGED in git, held for `commit phase 7`)
 
 ## Phase status
 - [x] Phase 1 — Foundation: Tenant model, JWT auth (register/login), dashboard shell, Alembic, pytest
@@ -13,7 +14,7 @@ Phase 7 — Hardening (COMPLETE, pending review — NOT committed)
 - [x] Phase 5 — Per-tenant WebSocket live feed + usage charts (stats endpoint)
 - [x] Phase 6 — Platform admin auth + system-wide overview; frontend design-system pass
 - [x] Phase 7 — Full-stack Docker, structured logging, Sentry, SSRF guard, CI expansion, more tests
-- [ ] Phase 8 — Deploy
+- [~] Phase 8 — Deploy: deployment prep + smoke test done & verified in containers; cloud deploy pending
 
 ## Phase 1 — what was built and why
 
@@ -410,6 +411,45 @@ at `127.0.0.1` explicitly. Confirmed after the fix: all four containers
 per line with `LOG_JSON=true`; `curl :8080/api/services` (no token) correctly
 reverse-proxied to the backend and got `401`, proving the nginx → backend path
 works end to end.
+
+## Phase 8 — what was built and why
+
+### Deployment topology
+Two services, both Docker-built. **frontend** is the only public one (nginx) —
+it reverse-proxies `/api`, `/gw`, `/ws` to the **backend** over the platform's
+private network, so the browser stays single-origin: no CORS, no public backend
+URL to leak or lock down. `railway.json` in each service dir pins the builder
+and health check.
+
+### Things that make it deploy-portable (not Railway-specific)
+- `config.py` auto-upgrades a bare `postgres://` / `postgresql://` `DATABASE_URL`
+  to `postgresql+asyncpg://` — every managed-Postgres provider hands you the
+  bare form.
+- Backend Dockerfile `CMD` binds `${PORT:-8000}` and adds
+  `--proxy-headers --forwarded-allow-ips='*'` so `X-Forwarded-Proto/-For` from
+  the platform edge are trusted (right scheme in redirects, right client IP).
+- `nginx.conf` is an `envsubst` template: `${PORT}` and `${BACKEND_UPSTREAM}`
+  are filled at container start (`NGINX_ENVSUBST_FILTER` limits substitution to
+  exactly those two, so nginx's own `$host` / `$http_upgrade` survive).
+- `TrustedHostMiddleware` wired behind `ALLOWED_HOSTS` (default `*` = off) for
+  Host-header spoofing protection when you want it.
+
+### Smoke test (`scripts/smoke_test.py`) — the brief's "demonstrate rate limiting live"
+Points at any running instance (`python -m scripts.smoke_test <url>`), registers
+a fresh tenant, creates a service against `httpbin.org`, mints a key, fires 20
+requests at a `limit=5/60s` token bucket, and asserts **exactly 5 × 200 + 15 ×
+429**, then that a request succeeds again after the bucket refills. Run against
+the local container stack: **PASSED** (`5 x 200, 15 x 429`, refill confirmed).
+
+### Verified
+`docker compose up -d --build` with all Phase 7 + 8 changes: 4/4 containers
+healthy, `${PORT}`/`${BACKEND_UPSTREAM}` correctly substituted into the rendered
+nginx config, SPA + proxied API both serving, smoke test green. Backend suite
+still 100 passing (added `test_config.py`).
+
+### Still pending
+The actual cloud deploy (needs the user's Railway account) — everything above is
+the reproducible prep, verified as far as it can be without provisioning.
 
 ## Known simplifications (demo-scale vs production)
 - SSRF guard is best-effort (no DNS-rebinding protection) and off by default —
